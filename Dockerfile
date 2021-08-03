@@ -1,29 +1,49 @@
-FROM nvidia/cuda:8.0-devel-centos7
+FROM ubuntu:20.04
 
-# Install MKL
-RUN yum-config-manager --add-repo https://yum.repos.intel.com/mkl/setup/intel-mkl.repo
-RUN rpm --import https://yum.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS-2019.PUB
-RUN yum install -y intel-mkl-2019.3-062
-ENV LD_LIBRARY_PATH /opt/intel/mkl/lib/intel64:$LD_LIBRARY_PATH
-ENV LIBRARY_PATH /opt/intel/mkl/lib/intel64:$LIBRARY_PATH
-ENV LD_PRELOAD /usr/lib64/libgomp.so.1:/opt/intel/mkl/lib/intel64/libmkl_def.so:\
-/opt/intel/mkl/lib/intel64/libmkl_avx2.so:/opt/intel/mkl/lib/intel64/libmkl_core.so:\
-/opt/intel/mkl/lib/intel64/libmkl_intel_lp64.so:/opt/intel/mkl/lib/intel64/libmkl_gnu_thread.so
+ENV DEBIAN_FRONTEND=noninteractive
 
-# Install necessary build tools
-RUN yum install -y gcc-c++ make swig3
+# Install python3, swig, and MKL
+RUN apt-get update
+RUN apt-get install -y python3-dev python3-pip
+RUN apt-get install -y swig
+RUN apt-get install -y libmkl-dev
 
-# Install necesary headers/libs
-RUN yum install -y python-devel numpy
+# Install recent CMake
+RUN apt-get install -y wget
+RUN wget -nv -O - https://github.com/Kitware/CMake/releases/download/v3.17.1/cmake-3.17.1-Linux-x86_64.tar.gz | tar xzf - --strip-components=1 -C /usr
 
-COPY . /opt/faiss
+# Install numpy/scipy/pytorch for python tests
+RUN pip3 install numpy scipy torch
 
-WORKDIR /opt/faiss
+ENV OMP_NUM_THREADS=10
+ENV MKL_THREADING_LAYER=GNU
 
-# --with-cuda=/usr/local/cuda-8.0 
-RUN ./configure --prefix=/usr --libdir=/usr/lib64 --without-cuda
-RUN make -j $(nproc)
-RUN make -C python
-RUN make test
-RUN make install
-RUN make -C demos demo_ivfpq_indexing && ./demos/demo_ivfpq_indexing
+# Copy the repo to the docker image
+COPY . /faiss
+WORKDIR /faiss
+
+# Build
+RUN cmake -B build \
+    -DBUILD_TESTING=ON \
+    -DFAISS_ENABLE_GPU=OFF \
+    -DFAISS_OPT_LEVEL=avx2 \
+    -DFAISS_ENABLE_C_API=ON \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBLA_VENDOR=Intel10_64_dyn .
+RUN make -C build -j faiss
+
+# Run cpp tests
+RUN make -C build -j faiss_test
+RUN make -C build -j test
+
+# Build python tests
+RUN make -C build -j swigfaiss
+RUN cd build/faiss/python && python3 setup.py build
+RUN cd build/faiss/python && python3 setup.py install
+
+RUN pip3 install pytest
+
+ENV PYTHONPATH=/faiss/build/faiss/python/build/lib/
+
+RUN pytest tests/test_*.py
+RUN pytest tests/torch_*.py
